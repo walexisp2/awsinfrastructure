@@ -1,0 +1,352 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Infrastructura AWS Vtex",
+        "Parameters": {
+            
+            "ImageRepositoryECR":{
+                "Description":"Nombre de la imagen del repositorio ECR sin incluir el Tag con el que se identifica, este debe ser el mismo que se tiene en el Builspec",
+                "Type":"String"
+    
+            },
+            "TagECR":{
+                "Description":"Etiqueta repositorio ECR ",
+                "Type":"String"
+            },
+            "ClusterName":{
+                "Description":"Nombre de Cluster que debe ser unico para cada region",
+                "Type":"String"
+            },
+            "ServiceName":{
+                "Description":"Nombre del service que debe ser unico para cada region",
+                "Type":"String"
+            },
+            "VpcName":{
+                "Description":"Seleccione la VPC, donde se creara la infraestructura.",
+                "Type": "AWS::EC2::VPC::Id"
+            },
+            "subnets":{
+                "Description":"Seleccione las subnets ECS (debe tener relacion con la VPC), donde se creara la infraestructura.",
+                "Type": "List<AWS::EC2::Subnet::Id>"
+            },  
+            "subnetsLoadBalancer":{
+                "Description":"Seleccione las subnets del loadbalancer (debe tener relacion con la VPC), donde se creara la infraestructura.",
+                "Type": "List<AWS::EC2::Subnet::Id>"
+            },       
+            "HealthCheckPathName":{
+                "Description":"Nombre del servivio que valida la salud del servidor (/api/health --> retorna un 200)",
+                "Type":"String",
+                "Default":"/api/values"
+            },
+            "BalancerListenerPort" : {
+                "Description" : "TCP/IP puerto para el Listener del Balanceador. (Este puerto no puede estar en uso dentro la VPC)",
+                "Type" : "Number",
+                "MinValue" : "80",
+                "MaxValue" : "9090"
+            },
+            "SecurityGroupServicePort":{
+                "Default" : "80",
+                "Description":"Puerto para security group del servicio",
+                "Type":"String"
+            },
+            "MemoryTask":{
+                "Description":"Memoria Task Definition",
+                "Type":"Number",
+                "AllowedValues" : [512,1024,2048,3072,4096,5120,6144,7168,8192,9216,10240,11264,12288,13312,14336,15360,16384,17408,18432,19456,20480,21504,22528,23552,24576,25600,26624,27648,28672,29696,30720]
+            },
+            "CpuTask":{
+                "Description":"Cpu Task Definition",
+                "Type":"Number",
+                "AllowedValues" : [256,512,1024,2048,4096]
+            },
+            "TaskQuantity":{
+                "Description":"Ingresar la cantidad de Task simultaneas que desea",
+                "Type":"Number",
+                "Default":"1"
+
+            },
+            "Environment": {
+              "Description": "Environment Application",
+              "Type": "String",
+              "AllowedValues": ["development", "production"],
+              "Default": "development"
+            },
+            "ProjectName":{
+                "Description": "El nombre del proyecto de la aplicación",
+                "Type": "String"
+            }
+        },
+        "Resources": {    
+            "RoleTaskDefinition": {
+                "Type": "AWS::IAM::Role",
+                "Properties": {
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Principal": {
+                                    "Service": [
+                                        "ecs-tasks.amazonaws.com"
+                                    ]
+                                },
+                                "Action": [
+                                    "sts:AssumeRole"
+                                ]
+                            }
+                        ]
+                    },
+                    "Path": "/",
+                    "Policies": [
+                        {
+                            "PolicyName": { "Fn::Join": ["policy",[ {"Ref": "AWS::StackName"},"TaskDefinition"] ] },
+                            "PolicyDocument": {
+                                "Version": "2012-10-17",
+                                "Statement": [
+                                    {
+                                        "Effect": "Allow",
+                                        "Action": [
+                                            "autoscaling:Describe*",
+                                            "cloudwatch:*",
+                                            "logs:*",
+                                            "sns:*",
+                                            "iam:GetPolicy",
+                                            "iam:GetPolicyVersion",
+                                            "iam:GetRole",
+                                            "ecr:GetAuthorizationToken",
+                                            "ecr:BatchCheckLayerAvailability",
+                                            "ecr:GetDownloadUrlForLayer",
+                                            "ecr:BatchGetImage",
+                                            "events:*"
+                                        ],
+                                        "Resource": "*"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+
+
+
+    
+            "LogGroupTaskDefinition": 
+            {
+                "Type" : "AWS::Logs::LogGroup",
+                "Properties" : {
+                    "LogGroupName" : {"Fn::Join": [
+                    "", [
+                        "/ecs/",
+                        {
+                            "Ref": "AWS::StackName"
+                        },
+                        "-Task"                               
+                        ] 
+                    ]},
+                    "RetentionInDays": 365
+                }
+            },
+    
+            "SecurityGroupBalancer":
+            {
+                "Type" : "AWS::EC2::SecurityGroup",
+                "Properties" : {
+                    "Tags": [{ "Key": "env", "Value": {"Ref": "Environment" }},
+                        {"Key": "Servicio", "Value": "SecurityGroup" },
+                        { "Key": "Name" , "Value": { "Fn::Join": ["-",[ "sg-lb" ,{"Ref": "AWS::StackName"}, {"Ref": "ProjectName"}] ] } }
+                        ],
+                   "GroupName" : { "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"LB-SG"] ] },
+                   "GroupDescription" : "Security Group Balancer ECS/Fargate",              
+                   "SecurityGroupIngress" : [ {
+                        "IpProtocol": "tcp",
+                        "CidrIp": "0.0.0.0/0",
+                        "FromPort": { "Ref": "BalancerListenerPort" },
+                        "ToPort": { "Ref": "BalancerListenerPort" }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "CidrIpv6":"::/0",
+                        "FromPort": { "Ref": "BalancerListenerPort" },
+                        "ToPort": { "Ref": "BalancerListenerPort" }
+                    }],
+                   "VpcId" : {"Ref":"VpcName"}
+                }
+            },
+    
+            "LoadBalancer":
+            {
+                "Type" : "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                "DependsOn":["SecurityGroupBalancer"],
+                "Properties" : {    
+                  "Tags": [{ "Key": "env", "Value": {"Ref": "Environment" }},
+                        {"Key": "Servicio", "Value": "LoadBalancer" },
+                        { "Key": "Name" , "Value": { "Fn::Join": ["-",[ "lb" ,{"Ref": "AWS::StackName"}, {"Ref": "ProjectName"}] ] } }
+                        ],
+                  "Name" : { "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"LoadBalancer"] ] },
+                  "Scheme" : "internet-facing",
+                  "SecurityGroups" : [ {"Ref":"SecurityGroupBalancer"}],
+                  "Subnets" : {
+                   "Ref": "subnetsLoadBalancer"
+    
+                  },
+                  "Type" : "application"
+                }
+            },
+    
+            "TargetGroup":
+            {
+                "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+                "Properties" : {
+                    "Tags": [{ "Key": "env", "Value": {"Ref": "Environment" }},
+                        {"Key": "Servicio", "Value": "TargetGroup" },
+                        { "Key": "Name" , "Value": { "Fn::Join": ["-",[ "tg" ,{"Ref": "AWS::StackName"}, {"Ref": "ProjectName"}] ] } }
+                        ],
+                    "HealthCheckPath" : {"Ref":"HealthCheckPathName"},
+                    "HealthCheckProtocol" : "HTTP",
+                    "HealthyThresholdCount" : 10,
+                    "Name": {
+                        "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"TGService"] ]
+                    },
+                    "Port" : 80,
+                    "Protocol" : "HTTP",
+                    "VpcId" : {"Ref":"VpcName"},
+                    "TargetType":"ip"
+                }
+            },
+    
+            "Listener": 
+            {
+                "Type": "AWS::ElasticLoadBalancingV2::Listener",
+                "Properties": {
+                  "DefaultActions": [{
+                        "Type": "forward",
+                        "TargetGroupArn": { "Ref": "TargetGroup" }
+                  }],
+                  "LoadBalancerArn": { "Ref": "LoadBalancer" },
+                  "Port" : { "Ref": "BalancerListenerPort" },
+                  "Protocol": "HTTP"
+                }
+            },
+    
+            "ListenerRuleService":
+            {
+                "Type" : "AWS::ElasticLoadBalancingV2::ListenerRule",
+                "DependsOn":["TargetGroup","Listener"],
+                "Properties" : {
+                  "Actions" : [{
+                    "Type": "forward",
+                    "TargetGroupArn": { "Ref": "TargetGroup" }
+                  }],
+                  "Conditions" : [{
+                    "Field" : "path-pattern",
+                    "Values" : [{"Ref":"HealthCheckPathName"}]
+                  }],
+                  "ListenerArn" : { "Ref": "Listener" },
+                  "Priority" : 2    
+                }
+            },  
+    
+            "SecurityGroupServiceCluster":
+            {
+                "Type" : "AWS::EC2::SecurityGroup",
+                "DependsOn":["SecurityGroupBalancer"],
+                "Properties" : {
+                    "Tags": [{ "Key": "env", "Value": {"Ref": "Environment" }},
+                        {"Key": "Servicio", "Value": "SecurityGroup" },
+                        { "Key": "Name" , "Value": { "Fn::Join": ["-",[ "sg-ecs", {"Ref": "AWS::StackName"}, {"Ref": "ProjectName"}] ] } }
+                        ],
+                   "GroupName" : { "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"Service-SG"] ] },
+                   "GroupDescription" : "Security Group Service Cluster ECS/Fargate",
+                   "SecurityGroupIngress" : [ {
+                        "IpProtocol": "tcp",
+                        "SourceSecurityGroupId": {"Ref":"SecurityGroupBalancer"},
+                        "FromPort": {"Ref":"SecurityGroupServicePort"},
+                        "ToPort": {"Ref":"SecurityGroupServicePort"}
+                    }],
+                   "VpcId" : {"Ref":"VpcName"}
+                }
+            },    
+    
+    
+    
+            "TaskDefinition":
+            {
+                "Type" : "AWS::ECS::TaskDefinition",
+                "DependsOn":["LogGroupTaskDefinition","RoleTaskDefinition"],
+                "Properties" : 
+                {
+                  "Cpu" : {"Ref":"CpuTask"},
+                  "Memory" : {"Ref":"MemoryTask"},
+                  "NetworkMode" : "awsvpc",
+                  "RequiresCompatibilities":["FARGATE"],
+                  "ExecutionRoleArn": {"Ref":"RoleTaskDefinition"},
+                  "TaskRoleArn": {"Ref":"RoleTaskDefinition"},
+                  "ContainerDefinitions" : [
+                    {
+                        "Name":{ "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"Container"] ] },
+                        "Image":!Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageRepositoryECR}:${TagECR}",
+                        "MemoryReservation":"128",
+                        "Cpu":"0",
+                        "PortMappings": [{
+                              "HostPort": 80,
+                              "Protocol": "tcp",
+                              "ContainerPort": 80
+                            }],
+                        "Environment": [{
+                            "Name": "ASPNETCORE_ENVIRONMENT",
+                            "Value": { "Ref": "Environment" }
+                        }],
+                        "LogConfiguration": {
+                            "LogDriver": "awslogs",
+                            "Options": {
+                              "awslogs-group": {"Ref": "LogGroupTaskDefinition"},
+                              "awslogs-region":{"Ref": "AWS::Region"},
+                              "awslogs-stream-prefix": "ecs"
+                            }
+                        }
+                    }  
+                   ],
+                  "Family":{"Fn::Join": ["-", [ {"Ref": "AWS::StackName"}, "Task"] ]}
+                }
+            },
+    
+    
+    
+            "ServiceCluster":
+            {
+                "Type":"AWS::ECS::Service",
+                "DependsOn":["ListenerRuleService","SecurityGroupServiceCluster"],
+                "Properties":{
+                    "Cluster":{"Ref":"ClusterResource"},
+                    "DesiredCount":{"Ref":"TaskQuantity"},
+                    "LaunchType":"FARGATE",
+                    "LoadBalancers":[{
+                            "ContainerName":{ "Fn::Join": ["-",[ {"Ref": "AWS::StackName"},"Container"] ] },
+                            "ContainerPort":80,
+                            "TargetGroupArn":{ "Ref" : "TargetGroup" }
+                    }],
+                    "NetworkConfiguration":{
+                        "AwsvpcConfiguration":{
+                            "Subnets":{"Ref": "subnets"},
+                            "AssignPublicIp":"DISABLED",
+                            "SecurityGroups":[{ "Ref" : "SecurityGroupServiceCluster" }]
+                        }
+                    },
+                    "SchedulingStrategy":"REPLICA",
+                    "ServiceName":{"Ref":"ServiceName"},
+                    "TaskDefinition":{"Ref":"TaskDefinition"}
+                }
+            },
+      "ClusterResource":{
+        "Type":"AWS::ECS::Cluster",
+        "Properties":{
+            "Tags": [{ "Key": "env", "Value": {"Ref": "Environment" }},
+                {"Key": "Servicio", "Value": "ClusterECS" },
+                { "Key": "Name" , "Value": { "Fn::Join": ["-",[ "clusterECS", {"Ref": "AWS::StackName"}, {"Ref": "ProjectName"}] ] } }
+                ],
+            "ClusterName": {"Ref":"ClusterName"}
+        }
+    }
+    
+        }
+    }
